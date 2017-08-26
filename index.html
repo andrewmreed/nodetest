@@ -1,0 +1,265 @@
+<!--
+	TODO
+	For BETA: death anim, casting anim, highscores, logging/icons/multiplier, fire spell
+	
+	Bugs:
+		Show whacks before ending game
+		ROTORED -> ROT.RED takes extra rounds to clear
+		
+		
+	For sure
+		Game reset / menu
+		
+		Spell casting, 
+		
+		More spells
+			- board effects  (fire squares, shuffle in place, spewing letters, fog, teleport a few letters )
+			- hand effects  (scramble letters per turn, shorten handsize temporarily)
+			- shapeshifting/familiars
+			
+		Better logging / icons / multiplier
+
+		Balance
+
+		High score / stats
+		
+		Casting sprite / countdown
+		
+		ping?  how to do on tablet?
+		
+		server side game phases and such
+		
+	For Fun
+		Attack animations
+		Level up sprites
+		Death sprite
+		Scenery
+		Shakeys
+		Conversation
+		Music
+		Instructions
+		
+	Maintenence
+		Reworking queue/blocking
+		Clean up magic values & gameplay rule numbers for balance (atks, hp, cooldowns, level ups, etc.)
+		Break up index.js
+		Tile datatypes
+		
+	
+
+
+-->
+
+<html>
+<head>
+	<style type="text/css">
+		@font-face {
+		    font-family: "PressStart";
+		    src: url(/inc/prstartk.ttf) format("truetype");
+		}
+	</style>
+	<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js" type="text/javascript"></script>
+	<script src="/socket.io/socket.io.js"></script>
+	
+	<script src="js/client/game.js"></script>
+	<script src="js/client/io.js"></script>
+	<script src="js/client/anim.js"></script>
+	<script src="js/client/util.js"></script>
+	
+	<script src="js/server/data.js"></script>
+	
+	<script>
+		var socket = io();
+		
+		var canvas, ctx;
+	
+		var images = [];
+		var imageList = [
+			'background', 'knight', 'archer', 'wizard', 'fire', 'arrow', 'fireball',
+			'sorcerer', 'sorcerer_chantbase', 'sorcerer_chantmouth1', 'sorcerer_chantmouth2', 'sorcerer_dying', 'sorcerer_spell', 
+			'sword', 'staff', 'bow', 'abc', 'tile_base_64', 'tile_base_48',
+			
+			'quote-ul','quote-ur','quote-ll','quote-lr', 'quote-line-t', 'quote-line-b', 'quote-line-r', 'quote-line-l', 'quote-triangle-r', 'quote-triangle-l'
+		];
+		
+		var gameEvents = {
+			'grid': {'list': [], 'currentlyProcessing': 0, 'isBlocked':false},
+			'arena': {'list': [], 'currentlyProcessing': 0, 'isBlocked':false}
+		}
+	
+		
+		var hand = [], otherHand = [];
+		var grid = [[],[],[],[],[],[],[]];
+
+		var handSelectedIdx = -1, otherHandSelectedIdx = -1;
+		var playerIdx = -1;	
+		var knight, archer, wizard, heroes;
+		var sorcerer;
+		var spellCounter = 100;
+		
+		var gameLog = [];
+		
+		
+		/* ***********         Game Setup           **************** */
+		socket.on('confirm_join', function(o){
+			playerIdx = o.playerIdx;
+			console.log('Joined! I am ' + playerIdx);
+			$('#divLobbyStatus').html('Waiting for a partner...');
+		});
+		
+		socket.on('player_joined', function(o) {
+			$('#divLobbyStatus').html(o.name + ' has joined the game');
+		});
+		
+		socket.on('deal_hand', function(o){
+			console.log('dealHand');
+			console.log(o);
+			if (o.playerIdx == playerIdx) hand = o.hand;
+			else otherHand = o.hand;
+			render();
+		});
+		
+		socket.on('game_start', function(o) {
+			startGame(o);
+			showScreen('game');
+		});
+		
+		
+		/* ***********         Playing           **************** */
+		socket.on('partner_chose_letter', function(o) {
+			otherHandSelectedIdx = o.idx;
+			render();
+		});
+		
+		socket.on('letter_played', function(o){
+			gameEvents.grid.list.push({'type':'letter_played', 'data':o});
+			processGameEvents();
+		});
+		
+		socket.on('words_spelled', function(o){
+			console.log('Word Spelled:', o);
+			gameEvents.grid.list.push({'type':'words_spelled', 'data':o, 'isBlocking':true});
+			processGameEvents();
+		});
+		
+		socket.on('spell_cast', function(o) {
+			console.log('Spell Cast:', o);
+			gameEvents.grid.list.push({'type':'spell_cast', 'data':o, 'isBlocking':true});
+		});
+		
+		socket.on('partner_sent_hint', function(o) {
+			console.log('Hint given:', o);
+			gameEvents.arena.list.push({'type':'partner_sent_hint', 'data':o, 'isBlocking':true});
+			processGameEvents();
+		});
+		
+		
+		/* ***********         Fighting           **************** */
+		socket.on('attack', function(o){
+			gameEvents.arena.list.push({'type':'attack', 'data':o, 'isBlocking':true});
+		});
+		
+		socket.on('level_up', function(o){
+			gameEvents.arena.list.push({'type':'level_up', 'data':o, 'isBlocking':true});
+		});
+		
+		/*socket.on('new_grid', function(o){
+			grid = o;
+			render();
+		});*/
+		
+		socket.on('you_win', function(o){
+			$('#spanLettersPlayed').text(o.lettersPlayed);
+			displayHighScores(o.highScores);
+			showScreen('game_over');
+		});
+		
+		/* ***********         Misc.           **************** */
+		socket.on('error', function(o){
+			console.log('An ERROR occured: ');
+			console.log(o);
+		});
+		
+		socket.on('reset', function(o){
+			gameLog = [];
+			showScreen('lobby');
+		});
+			
+		function joinClick() {
+			if ($('#txtPlayerName').val() == '') {alert('Enter your name:'); return;}
+			socket.emit('join', {'name' : $('#txtPlayerName').val()});
+		}
+		
+		function resetGameClick() {
+			socket.emit('request_reset');
+		}
+		
+		
+		$(function() {setup();});
+		
+		function displayHighScores(hs) {
+			var s = '<table>';
+			for (var i =  0; i < hs.length; i++) {
+				var h = hs[i];
+				s += '<tr><td>' + h.p1 + '</td><td>' + h.p2 + '</td><td>' + h.score + '</td></tr>';
+			}
+			s += '</table>';
+			$('#spanHighScores').html(s);
+		}
+		
+		
+	</script>
+	<style>
+		body {font-family:Verdana; color: #333; font-size:18px;}
+		input[type="button"] {color:white; font-size:24px; border:0; background-color:#006; padding:6px 14px;}
+		input[type="text"] {height:36px;}
+		
+		#txtPlayerName {width:200px; padding-left:12px; font-size:24px;}
+		#divLobbyStatus {color:#600; font-weight:bold; font-size:18px; margin:20px 0px 0px 200px;}
+		#divRegister {margin:30px;}
+				
+		#divLobby {width:800px;}
+		#divLobby div.clear {clear:both; height:14px;}
+		#divLobby img {float:left; margin-right:10px;}
+		#divLobby ul {margin-left:70px;}
+		
+	</style>
+</head>
+
+<body>
+	
+	<div id="divLobby">
+		<h4 style="font-family:PressStart;">Counterspell</h4>  <!-- need to preload this font.  Might as well do it here. -->
+		An evil sorcerer has been casting evil spells!  Our heroes must spell better than him!  Cooperate with your teammate to spell words on the grid and defeat him.
+		
+		
+		<div class="clear"></div>
+		<div id="divLobbyStatus"></div>
+		<div id="divRegister">
+			Enter Your name: <input type="text" id="txtPlayerName" />
+			<input type="button" id="btnRegister" onClick="joinClick();" value="Join Game" />
+		</div>
+		
+		<h5>Cast</h5>
+		<img src="img/knight.png"> The <b>knight</b> <ul><li>Attacks when you spell a 5-letter word</li><li>Levels up when you spell a 7-letter word</li></ul>
+		<div class="clear"></div>
+		<img src="img/archer.png"> The <b>archer</b> <ul><li>Attacks when you spell a 10-point word</li><li>Levels up when you spell a 14-point word</li></ul>
+		<div class="clear"></div>
+		<img src="img/wizard.png"> The <b>wizard</b> <ul><li>Attacks when 7 letters are used in one attack (counting multiple words).</li><li>Levels up if 9 letters are used</li></ul>
+		<div class="clear"></div>
+		Good luck!
+	</div>
+	
+	<div id="divGame" style="display:none;">
+		<canvas width="1000" height="600" id="oCanvas" style="border:1px solid black;"></canvas>
+	</div>
+	
+	<div id="divGameOver" style="display:none;">
+		<h3>You win!</h3>
+		<h5>Letters played: <span id="spanLettersPlayed"></span>
+		<span id="spanHighScores"></span>
+	</div>
+	
+	<input type="button" text="RESET GAME" onClick="resetGameClick();" style="display:none;" />
+</body>
+</html>
